@@ -43,6 +43,31 @@ npm start                 # http://localhost:3000
 The UI works without keys (you can browse the flow), but `/api/extract` and `/api/generate` need
 valid keys to return real results. The health badge (top-right) shows whether both keys are detected.
 
+## Multi-photo modes
+
+Upload one or many photos. With 2+ photos you choose how they are treated:
+
+- **One product (`combine`, default)** — photos are different angles of the *same* item
+  (Meesho wants Front / Zoomed In / Table top). All images go into a **single** Gemini call and
+  are consolidated into **one** listing, with per-image QC so you can see which shot fails
+  Meesho's image rules. Total upload is capped by `MAX_COMBINED_BYTES` to stay under Gemini's
+  per-request ceiling.
+- **Different products (`batch`)** — each photo is its own product. One Gemini call per photo at
+  `BATCH_CONCURRENCY` parallelism (bounded so we don't self-429), producing **one listing per
+  photo**. A single bad photo fails only its own item; the rest of the batch still completes.
+
+API shapes:
+
+```
+POST /api/extract   multipart: images[] (or legacy `image`), mode=combine|batch
+  combine -> { mode, image_count, fields, warnings, items:[...] }
+  batch   -> { mode, count, succeeded, items:[{index, filename, ok, fields|error}] }
+
+POST /api/generate
+  single -> { fields, category }              -> { listing, category, validation, ... }
+  batch  -> { items:[{fields, category}] }    -> { mode, count, succeeded, items:[...] }
+```
+
 ## Deployment (Ubuntu + nginx + pm2)
 
 Deployed behind an existing nginx site as a sub-path, e.g. `https://ship.apanjob.com/meesho/`.

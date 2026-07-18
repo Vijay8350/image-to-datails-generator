@@ -14,11 +14,16 @@ const API_BASE = location.pathname.replace(/\/[^/]*$/, "/");
 const api = (path) => API_BASE + String(path).replace(/^\//, "");
 
 const state = {
-  file: null,
+  files: [], // one or many selected photos
   rules: null, // from /api/rules
-  extracted: null, // Gemini fields
+  extracted: null, // Gemini fields (combine / single mode)
+  batchItems: null, // per-photo extracted fields (batch mode)
+  mode: "combine", // "combine" | "batch"
   attributeSet: null, // mandatory/optional for current category
 };
+
+const photoMode = () =>
+  document.querySelector('input[name="photoMode"]:checked')?.value || "combine";
 
 // ---- Boot: load rules + health ----------------------------------------------
 init().catch((e) => console.error(e));
@@ -65,41 +70,109 @@ function wireUpload() {
   dz.addEventListener("drop", (e) => {
     e.preventDefault();
     dz.classList.remove("drag");
-    if (e.dataTransfer.files[0]) setFile(e.dataTransfer.files[0]);
+    if (e.dataTransfer.files.length) addFiles(e.dataTransfer.files);
   });
   input.addEventListener("change", () => {
-    if (input.files[0]) setFile(input.files[0]);
+    if (input.files.length) addFiles(input.files);
+    input.value = ""; // allow re-picking the same file
   });
 
   $("extractBtn").addEventListener("click", runExtract);
   $("generateBtn").addEventListener("click", runGenerate);
 }
 
-function setFile(file) {
-  state.file = file;
-  const img = $("preview");
-  img.src = URL.createObjectURL(file);
-  img.hidden = false;
-  $("dropText").hidden = true;
-  $("extractBtn").disabled = false;
+/** Append to the selection (dropping twice adds, it does not replace). */
+function addFiles(fileList) {
+  const incoming = Array.from(fileList).filter((f) => f.type.startsWith("image/"));
+  for (const f of incoming) {
+    const dup = state.files.some((x) => x.name === f.name && x.size === f.size);
+    if (!dup) state.files.push(f);
+  }
+  renderThumbs();
+}
+
+function removeFile(idx) {
+  state.files.splice(idx, 1);
+  renderThumbs();
+}
+
+function renderThumbs() {
+  const host = $("thumbs");
+  host.innerHTML = "";
+  state.files.forEach((f, i) => {
+    const el = document.createElement("div");
+    el.className = "thumb";
+    el.innerHTML = `
+      <img src="${URL.createObjectURL(f)}" alt="${escapeAttr(f.name)}" />
+      <button class="thumb-x" data-i="${i}" title="Remove">×</button>
+      <span class="thumb-name">${escapeHtml(f.name)}</span>`;
+    host.appendChild(el);
+  });
+  host.querySelectorAll(".thumb-x").forEach((b) =>
+    b.addEventListener("click", () => removeFile(Number(b.dataset.i)))
+  );
+
+  const n = state.files.length;
+  $("dropText").hidden = n > 0;
+  $("modeBox").classList.toggle("hidden", n < 2);
+  $("extractBtn").disabled = n === 0;
+  $("extractBtn").textContent =
+    n <= 1
+      ? "Extract fields from photo"
+      : photoMode() === "batch"
+      ? `Extract ${n} products`
+      : `Extract from ${n} photos (1 product)`;
 }
 
 // ---- STEP 1: extract ---------------------------------------------------------
 async function runExtract() {
   const status = $("extractStatus");
-  setStatus(status, "Reading image with Gemini…", "busy");
+  const n = state.files.length;
+  state.mode = n > 1 ? photoMode() : "combine";
+
+  setStatus(
+    status,
+    state.mode === "batch"
+      ? `Reading ${n} photos with Gemini (one product each)…`
+      : n > 1
+      ? `Reading ${n} photos with Gemini (same product)…`
+      : "Reading image with Gemini…",
+    "busy"
+  );
   $("extractBtn").disabled = true;
 
   try {
     const fd = new FormData();
-    fd.append("image", state.file);
+    state.files.forEach((f) => fd.append("images", f));
+    fd.append("mode", state.mode);
+
     const res = await fetch(api("/api/extract"), { method: "POST", body: fd });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "Extraction failed");
 
-    state.extracted = data.fields;
-    renderExtracted(data.fields, data.warnings || []);
-    setStatus(status, "Fields extracted.", "ok");
+    if (data.mode === "batch") {
+      state.batchItems = data.items;
+      state.extracted = null;
+      const failed = data.count - data.succeeded;
+      renderBatchExtracted(data);
+      setStatus(
+        status,
+        `Extracted ${data.succeeded}/${data.count} photos.` + (failed ? ` ${failed} failed.` : ""),
+        failed ? "warn" : "ok"
+      );
+    } else {
+      state.batchItems = null;
+      state.extracted = data.fields;
+      renderExtracted(data.fields, data.warnings || [], data.image_count || 1);
+      setStatus(
+        status,
+        data.image_count > 1
+          ? `Fields extracted from ${data.image_count} photos.`
+          : "Fields extracted.",
+        "ok"
+      );
+    }
+
     $("step-extracted").classList.remove("hidden");
     $("step-extracted").scrollIntoView({ behavior: "smooth", block: "start" });
   } catch (err) {
@@ -109,29 +182,76 @@ async function runExtract() {
   }
 }
 
-function renderExtracted(fields, warnings) {
+/** Batch mode: summarise each photo's detected product before generating. */
+function renderBatchExtracted(data) {
+  $("imageCompliance").innerHTML = "";
+  $("rawExtract").style.display = "none";
+
+  const rows = data.items
+    .map((it) => {
+      if (!it.ok) {
+        return `<li class="batch-row bad"><strong>${escapeHtml(it.filename || "photo " + (it.index + 1))}</strong> — failed: ${escapeHtml(it.error)}</li>`;
+      }
+      const f = it.fields;
+      const set = state.rules.attribute_sets[f.suggested_category] || state.rules.attribute_sets.generic;
+      return `<li class="batch-row"><strong>${escapeHtml(f.product_type || "product")}</strong>
+        <span class="cat-pill">${escapeHtml(f.suggested_category)}</span>
+        <small>${escapeHtml(it.filename || "")} · ${set.fields.length} fields</small></li>`;
+    })
+    .join("");
+
+  $("detectedLine").innerHTML =
+    `<strong>${data.succeeded}</strong> of <strong>${data.count}</strong> photos read as separate products:
+     <ul class="batch-list">${rows}</ul>`;
+  $("generateBtn").textContent = `Generate ${data.succeeded} Meesho listings`;
+}
+
+function renderExtracted(fields, warnings, imageCount = 1) {
+  $("rawExtract").style.display = "";
+  $("generateBtn").textContent = "Generate Meesho listing fields";
+
   // Image compliance chips
   const comp = $("imageCompliance");
   comp.innerHTML = "";
-  const ic = fields.image_compliance || {};
-  const chips = [
-    ["Plain white bg", ic.background_is_plain_white],
-    ["No watermark/text", !ic.has_watermark_or_text],
-    ["No logo", !ic.has_logo],
-    ["Solo product", ic.solo_product_no_props],
-  ];
-  chips.forEach(([label, pass]) => {
-    const el = document.createElement("span");
-    el.className = "chip " + (pass ? "pass" : "fail");
-    el.textContent = (pass ? "✓ " : "✗ ") + label;
-    comp.appendChild(el);
-  });
-  warnings.forEach((w) => {
-    const el = document.createElement("span");
-    el.className = "chip fail";
-    el.textContent = "⚠ " + w;
-    comp.appendChild(el);
-  });
+
+  const chipRow = (ic, label) => {
+    const wrap = document.createElement("div");
+    wrap.className = "chip-row";
+    if (label) wrap.innerHTML = `<span class="chip-label">${escapeHtml(label)}</span>`;
+    [
+      ["Plain white bg", ic.background_is_plain_white],
+      ["No watermark/text", !ic.has_watermark_or_text],
+      ["No logo", !ic.has_logo],
+      ["Solo product", ic.solo_product_no_props],
+    ].forEach(([t, pass]) => {
+      const el = document.createElement("span");
+      el.className = "chip " + (pass ? "pass" : "fail");
+      el.textContent = (pass ? "✓ " : "✗ ") + t;
+      wrap.appendChild(el);
+    });
+    return wrap;
+  };
+
+  // With several photos, show QC per image — Meesho checks each uploaded shot.
+  const per = fields.per_image_compliance;
+  if (imageCount > 1 && Array.isArray(per) && per.length) {
+    per.forEach((p, i) =>
+      comp.appendChild(chipRow(p, `Image ${p.image_index || i + 1}${p.shot_type ? ` · ${p.shot_type}` : ""}`))
+    );
+  } else {
+    comp.appendChild(chipRow(fields.image_compliance || {}, imageCount > 1 ? "Primary image" : ""));
+  }
+  if (warnings.length) {
+    const wrap = document.createElement("div");
+    wrap.className = "chip-row";
+    warnings.forEach((w) => {
+      const el = document.createElement("span");
+      el.className = "chip fail";
+      el.textContent = "⚠ " + w;
+      wrap.appendChild(el);
+    });
+    comp.appendChild(wrap);
+  }
 
   // Key/value grid of extracted fields
   const grid = $("extractedFields");
@@ -174,10 +294,41 @@ function renderExtracted(fields, warnings) {
 // ---- STEP 2: generate --------------------------------------------------------
 async function runGenerate() {
   const status = $("generateStatus");
-  setStatus(status, "Writing compliant copy with DeepSeek…", "busy");
   $("generateBtn").disabled = true;
 
   try {
+    if (state.mode === "batch" && state.batchItems) {
+      const good = state.batchItems.filter((i) => i.ok);
+      setStatus(status, `Writing ${good.length} listings with DeepSeek…`, "busy");
+
+      const res = await fetch(api("/api/generate"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          items: good.map((i) => ({
+            fields: i.fields,
+            category: i.fields.suggested_category,
+            filename: i.filename,
+          })),
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Generation failed");
+
+      renderBatchListings(data);
+      const failed = data.count - data.succeeded;
+      setStatus(
+        status,
+        `Generated ${data.succeeded}/${data.count} listings.` + (failed ? ` ${failed} failed.` : ""),
+        failed ? "warn" : "ok"
+      );
+      $("step-batch").classList.remove("hidden");
+      $("step-listing").classList.add("hidden");
+      $("step-batch").scrollIntoView({ behavior: "smooth", block: "start" });
+      return;
+    }
+
+    setStatus(status, "Writing compliant copy with DeepSeek…", "busy");
     const category = $("category").value;
     const res = await fetch(api("/api/generate"), {
       method: "POST",
@@ -190,6 +341,7 @@ async function runGenerate() {
     state.attributeSet = data.attribute_set;
     renderListing(data.listing, data.attribute_set);
     setStatus(status, "Listing generated. Edit any field — validation updates live.", "ok");
+    $("step-batch").classList.add("hidden");
     $("step-listing").classList.remove("hidden");
     $("step-listing").scrollIntoView({ behavior: "smooth", block: "start" });
   } catch (err) {
@@ -197,6 +349,76 @@ async function runGenerate() {
   } finally {
     $("generateBtn").disabled = false;
   }
+}
+
+/** Batch mode: one collapsible card per generated listing. */
+function renderBatchListings(data) {
+  state.batchListings = data.items;
+  $("batchSummary").textContent = `${data.succeeded} of ${data.count} generated`;
+
+  const host = $("batchResults");
+  host.innerHTML = "";
+
+  data.items.forEach((it) => {
+    const card = document.createElement("details");
+    card.className = "batch-item";
+    if (!it.ok) {
+      card.innerHTML = `<summary class="bad">${escapeHtml(it.filename || "photo " + (it.index + 1))} — failed: ${escapeHtml(it.error)}</summary>`;
+      host.appendChild(card);
+      return;
+    }
+
+    const L = it.listing;
+    const missing = it.missing_required.length;
+    const issues = Object.values(it.validation).flat().filter((v) => v.level === "error").length;
+    const filled = it.attribute_set.fields.filter((f) => String(L.attributes[f.key] ?? "").trim());
+
+    card.innerHTML = `
+      <summary>
+        <span class="bi-title">${escapeHtml(L.title)}</span>
+        <span class="cat-pill">${escapeHtml(it.category)}</span>
+        <span class="bi-meta">${L.title.length}/100 · ${filled.length} filled · ${missing} required empty${
+          issues ? ` · <span class="bad">${issues} issue(s)</span>` : ""
+        }</span>
+      </summary>
+      <div class="bi-body">
+        <div class="bi-row"><label>Product Name</label>
+          <input class="editable" value="${escapeAttr(L.title)}" data-bi="title" data-idx="${it.index}" /></div>
+        <div class="bi-row"><label>Description</label>
+          <textarea class="editable" rows="7" data-bi="description" data-idx="${it.index}">${escapeHtml(L.description)}</textarea></div>
+        <div class="bi-row"><label>Keywords (${L.keywords.length})</label>
+          <textarea class="editable" rows="3" data-bi="keywords" data-idx="${it.index}">${escapeHtml(L.keywords.join(", "))}</textarea></div>
+        <div class="bi-row"><label>Filled Meesho fields</label>
+          <div class="bi-attrs">${filled
+            .map((f) => `<span class="bi-attr"><b>${escapeHtml(f.label)}</b>: ${escapeHtml(String(L.attributes[f.key]))}</span>`)
+            .join("")}</div></div>
+        <div class="missing-summary warn">${missing} required field${missing === 1 ? "" : "s"} you must fill: ${escapeHtml(
+          it.missing_required.map((m) => m.label).join(", ")
+        )}</div>
+        <button class="copy bi-copy" data-idx="${it.index}">Copy this listing as JSON</button>
+      </div>`;
+    host.appendChild(card);
+  });
+
+  // Per-listing copy
+  host.querySelectorAll(".bi-copy").forEach((btn) =>
+    btn.addEventListener("click", async () => {
+      const it = data.items.find((x) => x.index === Number(btn.dataset.idx));
+      await copyText(JSON.stringify(listingPayload(it), null, 2), btn);
+    })
+  );
+}
+
+function listingPayload(it) {
+  return {
+    filename: it.filename,
+    category: it.category,
+    product_name: it.listing.title,
+    description: it.listing.description,
+    keywords: it.listing.keywords,
+    attributes: it.listing.attributes,
+    required_still_empty: it.missing_required.map((m) => m.label),
+  };
 }
 
 function renderListing(listing, attrSet) {
@@ -371,10 +593,38 @@ function setCounter(id, len, max) {
 }
 
 // ---- Copy buttons ------------------------------------------------------------
+/** Shared clipboard write with button feedback. */
+async function copyText(text, btn) {
+  try {
+    await navigator.clipboard.writeText(text);
+    const orig = btn.textContent;
+    btn.textContent = "Copied ✓";
+    btn.classList.add("done");
+    setTimeout(() => {
+      btn.textContent = orig;
+      btn.classList.remove("done");
+    }, 1200);
+  } catch {
+    /* clipboard blocked — no-op */
+  }
+}
+
 function wireCopyButtons() {
+  // Copy every generated listing in the batch as one JSON array.
+  $("copyAllBatch")?.addEventListener("click", async (e) => {
+    if (!state.batchListings) return;
+    const payload = state.batchListings.filter((i) => i.ok).map(listingPayload);
+    await copyText(JSON.stringify(payload, null, 2), e.currentTarget);
+  });
+
+  // Re-label the extract button when the user flips the mode.
+  document.querySelectorAll('input[name="photoMode"]').forEach((r) =>
+    r.addEventListener("change", renderThumbs)
+  );
+
   document.addEventListener("click", async (e) => {
     const btn = e.target.closest("button.copy, #copyAttrs");
-    if (!btn) return;
+    if (!btn || btn.id === "copyAllBatch" || btn.classList.contains("bi-copy")) return;
 
     let text = "";
     if (btn.id === "copyAttrs") {

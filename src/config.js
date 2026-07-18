@@ -48,6 +48,15 @@ export const ALLOWED_IMAGE_MIME = [
 // Keep well under Gemini's 20 MB total-request ceiling for inline base64.
 export const MAX_IMAGE_BYTES = 15 * 1024 * 1024; // 15 MB
 
+// ---- Multi-photo limits -------------------------------------------------------
+// Upload cap per request. In "combine" mode every image goes into ONE Gemini
+// request, so the total must stay under Gemini's 20 MB request ceiling — hence
+// the separate, smaller combined budget.
+export const MAX_IMAGES_PER_REQUEST = 12;
+export const MAX_COMBINED_BYTES = 16 * 1024 * 1024; // 16 MB across all images
+// Batch mode makes one call per photo; cap parallelism so we don't self-429.
+export const BATCH_CONCURRENCY = 3;
+
 // ---- Reliability: retry/backoff for 429s (both APIs rate-limit) --------------
 export const RETRY = {
   maxAttempts: 3,

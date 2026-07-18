@@ -26,9 +26,20 @@
         </div>
 
         <div id="dropzone" class="dropzone">
-          <input type="file" id="fileInput" accept="image/png,image/jpeg,image/webp,image/heic,image/heif" hidden />
-          <img id="preview" alt="preview" hidden />
-          <p id="dropText">Click or drop a product image here<br /><small>JPEG / PNG / WEBP / HEIC · max 15 MB</small></p>
+          <input type="file" id="fileInput" multiple
+                 accept="image/png,image/jpeg,image/webp,image/heic,image/heif" hidden />
+          <p id="dropText">Click or drop product photos here<br />
+            <small>One or many · JPEG / PNG / WEBP / HEIC · max 15 MB each</small></p>
+        </div>
+
+        <div id="thumbs" class="thumbs"></div>
+
+        <div id="modeBox" class="mode-box hidden">
+          <span class="mode-q">These photos are:</span>
+          <label><input type="radio" name="photoMode" value="combine" checked />
+            <strong>One product</strong> <small>different angles → 1 listing</small></label>
+          <label><input type="radio" name="photoMode" value="batch" />
+            <strong>Different products</strong> <small>→ 1 listing per photo</small></label>
         </div>
 
         <button id="extractBtn" class="primary" disabled>Extract fields from photo</button>
@@ -48,7 +59,16 @@
         <div id="generateStatus" class="status"></div>
       </section>
 
-      <!-- STEP 3: generated listing -->
+      <!-- STEP 3b: batch results (one listing per photo) -->
+      <section class="card hidden" id="step-batch">
+        <h2><span class="step-num">3</span> Batch listings <small class="by" id="batchSummary"></small></h2>
+        <div class="field-head" style="margin-bottom:12px">
+          <button class="copy" id="copyAllBatch">Copy all as JSON</button>
+        </div>
+        <div id="batchResults"></div>
+      </section>
+
+      <!-- STEP 3: generated listing (single product) -->
       <section class="card hidden" id="step-listing">
         <h2><span class="step-num">3</span> Generated listing <small class="by">by DeepSeek</small></h2>
 

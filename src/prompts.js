@@ -45,7 +45,8 @@ export const GEMINI_EXTRACT_SCHEMA = {
     },
     image_compliance: {
       type: "object",
-      description: "QC observations about the photo itself (for Meesho image rules)",
+      description:
+        "QC for the PRIMARY (first) image against Meesho image rules. With multiple images this describes image 1.",
       properties: {
         background_is_plain_white: { type: "boolean" },
         has_watermark_or_text: { type: "boolean" },
@@ -59,6 +60,25 @@ export const GEMINI_EXTRACT_SCHEMA = {
         "has_logo",
         "solo_product_no_props",
       ],
+    },
+    per_image_compliance: {
+      type: "array",
+      description:
+        "One entry per supplied image, in the same order. Only fill when more than one image is given.",
+      items: {
+        type: "object",
+        properties: {
+          image_index: { type: "integer", description: "1-based index of the image" },
+          background_is_plain_white: { type: "boolean" },
+          has_watermark_or_text: { type: "boolean" },
+          has_logo: { type: "boolean" },
+          solo_product_no_props: { type: "boolean" },
+          shot_type: {
+            type: "string",
+            description: "Best guess: Front, Zoomed In, Table top, or Other",
+          },
+        },
+      },
     },
   },
   required: [
@@ -79,6 +99,30 @@ export const GEMINI_EXTRACT_INSTRUCTION = [
   "- key_features must be concrete and visible (e.g. 'V-neck', 'three-quarter sleeves',",
   "  'printed floral pattern') — not marketing language.",
   "- Fill image_compliance honestly; it is used to warn the seller about Meesho image QC.",
+  "Return the result strictly as JSON matching the provided schema.",
+].join("\n");
+
+/**
+ * Used when several images of the SAME product are supplied (Meesho wants a
+ * front, a zoomed-in and a table-top shot). Consolidate them into ONE field set.
+ */
+export const GEMINI_COMBINE_INSTRUCTION = [
+  "You are a product-catalog vision analyst for an Indian e-commerce marketplace.",
+  "You are given MULTIPLE images of the SAME single product, from different angles",
+  "(typically a front view, a close-up/zoomed view and a top-down view).",
+  "",
+  "Produce ONE consolidated set of fields describing that single product:",
+  "- Merge evidence across all images. A detail visible in any image counts.",
+  "- Use the close-up images for material, texture and workmanship detail.",
+  "- Do NOT describe the images as separate products and do NOT multiply the",
+  "  quantity just because there are several photos.",
+  "- Report only what is visually evident. If a field cannot be determined from",
+  "  any image, return an empty string (or empty array) — never guess.",
+  "- key_features must be concrete and visible, not marketing language.",
+  "",
+  "Fill `image_compliance` for IMAGE 1 (the primary image), and fill",
+  "`per_image_compliance` with one entry per image in the given order, including",
+  "your best guess of each image's shot_type.",
   "Return the result strictly as JSON matching the provided schema.",
 ].join("\n");
 
