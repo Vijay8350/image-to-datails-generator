@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Meesho Listing Generator</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <h1>Meesho Listing Generator</h1>
+      <p class="sub">Photo → Gemini (vision) → DeepSeek (copy) → compliant catalog listing</p>
+      <span id="health" class="health" title="API key status"></span>
+    </header>
+
+    <main>
+      <!-- STEP 1: upload + extract -->
+      <section class="card" id="step-upload">
+        <h2><span class="step-num">1</span> Upload product photo</h2>
+
+        <div class="row">
+          <label class="field">
+            <span>Meesho category</span>
+            <select id="category"></select>
+          </label>
+        </div>
+
+        <div id="dropzone" class="dropzone">
+          <input type="file" id="fileInput" accept="image/png,image/jpeg,image/webp,image/heic,image/heif" hidden />
+          <img id="preview" alt="preview" hidden />
+          <p id="dropText">Click or drop a product image here<br /><small>JPEG / PNG / WEBP / HEIC · max 15 MB</small></p>
+        </div>
+
+        <button id="extractBtn" class="primary" disabled>Extract fields from photo</button>
+        <div id="extractStatus" class="status"></div>
+      </section>
+
+      <!-- STEP 2: extracted fields (raw vision output — collapsed by default) -->
+      <section class="card hidden" id="step-extracted">
+        <h2><span class="step-num">2</span> Image check <small class="by">by Gemini</small></h2>
+        <div id="imageCompliance" class="compliance"></div>
+        <div id="detectedLine" class="detected"></div>
+        <details id="rawExtract">
+          <summary>Show raw extracted fields</summary>
+          <div id="extractedFields" class="kv-grid"></div>
+        </details>
+        <button id="generateBtn" class="primary">Generate Meesho listing fields</button>
+        <div id="generateStatus" class="status"></div>
+      </section>
+
+      <!-- STEP 3: generated listing -->
+      <section class="card hidden" id="step-listing">
+        <h2><span class="step-num">3</span> Generated listing <small class="by">by DeepSeek</small></h2>
+
+        <div class="field-block">
+          <div class="field-head">
+            <label for="titleField">Title</label>
+            <span class="counter" id="titleCounter"></span>
+            <button class="copy" data-copy="titleField">Copy</button>
+          </div>
+          <input type="text" id="titleField" class="editable" />
+          <ul class="issues" id="titleIssues"></ul>
+        </div>
+
+        <div class="field-block">
+          <div class="field-head">
+            <label for="descField">Description</label>
+            <span class="counter" id="descCounter"></span>
+            <button class="copy" data-copy="descField">Copy</button>
+          </div>
+          <textarea id="descField" class="editable" rows="10"></textarea>
+          <ul class="issues" id="descIssues"></ul>
+        </div>
+
+        <div class="field-block">
+          <div class="field-head">
+            <label for="keywordsField">Keywords</label>
+            <span class="counter" id="keywordsCounter"></span>
+            <button class="copy" data-copy="keywordsField">Copy</button>
+          </div>
+          <textarea id="keywordsField" class="editable" rows="4"></textarea>
+          <ul class="issues" id="keywordsIssues"></ul>
+        </div>
+
+        <div class="field-block">
+          <div class="field-head">
+            <label>Meesho catalog fields</label>
+            <button class="copy" id="copyAttrs">Copy as JSON</button>
+          </div>
+          <div id="missingSummary" class="missing-summary"></div>
+          <div id="attributes"></div>
+        </div>
+
+        <div class="field-block">
+          <div class="field-head"><label>Required images</label></div>
+          <div id="imageReqs" class="image-reqs"></div>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <small>
+        Limits are undocumented by Meesho and enforced defensively (title ~100, description 1400).
+        Copy validates against Meesho QC before you paste into Seller Panel.
+      </small>
+    </footer>
+
+    <script src="app.js"></script>
+    <script src="pricing.js"></script>
+  </body>
+</html>
