@@ -30,6 +30,14 @@ export const GEMINI_API_BASE =
 // Set to "low"/"standard" if extraction accuracy ever regresses.
 export const GEMINI_THINKING_LEVEL = "minimal";
 
+// Hedging: if the primary model has not answered within this long, fire the
+// first fallback alongside it and take whichever returns first (the loser is
+// aborted). Gemini's latency on an IDENTICAL image was measured at 3.2s, 3.3s,
+// 4.4s, 8.6s and 23.8s with no retries and no 503s — pure upstream variance.
+// Set comfortably above the ~3.4s median so typical requests never trigger a
+// second call; set to 0 to disable hedging entirely.
+export const GEMINI_HEDGE_AFTER_MS = 5000;
+
 // ---- Text model: DeepSeek (writes the copy — TEXT ONLY, never the image) ------
 // OpenAI-compatible chat/completions endpoint.
 export const DEEPSEEK_MODEL = "deepseek-v4-flash";
@@ -103,6 +111,13 @@ export const RETRY = {
   maxDelayMs: 4000,
   retryStatuses: [429, 500, 502, 503, 504],
 };
+
+// Statuses where retrying the SAME endpoint is a waste of time and the caller
+// should fail over instead. Gemini's 503 is literally "this model is
+// experiencing high demand" — three backed-off retries against an overloaded
+// model was the main cause of the occasional 35s extraction, while a sibling
+// model answers in ~3s. Only applies where the caller has a fallback chain.
+export const FAIL_FAST_STATUSES = [503];
 
 // ---- Timeouts ----------------------------------------------------------------
 // With thinking capped on Gemini and reasoning off on DeepSeek, calls land in

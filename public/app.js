@@ -259,6 +259,16 @@ async function runExtract() {
 
     $("step-extracted").classList.remove("hidden");
     $("step-extracted").scrollIntoView({ behavior: "smooth", block: "start" });
+
+    // Chain straight into the write step. Waiting for a second click adds the
+    // user's own reaction time to every listing for no benefit — the category
+    // is auto-detected, and the Generate button stays live to rewrite the copy
+    // if they correct it afterwards.
+    if ($("autoRun")?.checked) {
+      const anyExtracted =
+        data.mode === "batch" ? data.items.some((i) => i.ok) : Boolean(data.fields);
+      if (anyExtracted) await runGenerate();
+    }
   } catch (err) {
     stopTimer();
     setStatus(status, err.message, "err");

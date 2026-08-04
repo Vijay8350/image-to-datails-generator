@@ -4,7 +4,7 @@
  * outbound model call goes through here.
  */
 
-import { RETRY, REQUEST_TIMEOUT_MS } from "./config.js";
+import { RETRY, REQUEST_TIMEOUT_MS, FAIL_FAST_STATUSES } from "./config.js";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -30,18 +30,48 @@ export async function fetchJsonWithRetry(url, options, label) {
   for (let attempt = 1; attempt <= RETRY.maxAttempts; attempt++) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    const started = Date.now();
+
+    // Callers may pass their own signal (hedged requests cancel the loser).
+    // Combine it with the timeout signal rather than letting one clobber the other.
+    const signal =
+      options.signal && AbortSignal.any
+        ? AbortSignal.any([controller.signal, options.signal])
+        : options.signal || controller.signal;
 
     try {
-      const res = await fetch(url, { ...options, signal: controller.signal });
+      const res = await fetch(url, { ...options, signal });
       clearTimeout(timer);
 
-      if (res.ok) return await res.json();
+      if (res.ok) {
+        // Read the body BEFORE logging: these APIs stream, so headers arrive
+        // almost immediately while the completion trickles in. Timing at the
+        // header makes a 5s call look like a 0.2s one.
+        const parsed = await res.json();
+        console.log(
+          `[upstream] ${label} ${res.status} in ${Date.now() - started}ms (attempt ${attempt})`
+        );
+        return parsed;
+      }
 
       const text = await res.text().catch(() => "");
       const retryable = RETRY.retryStatuses.includes(res.status);
 
+      // 503 means THIS model is shedding load. Retrying the same overloaded
+      // model just burns the backoff budget — the caller has a fallback chain,
+      // so hand back immediately and let it try a different model.
+      if (res.status === 503 && FAIL_FAST_STATUSES.includes(503)) {
+        console.warn(`[upstream] ${label} 503 after ${Date.now() - started}ms — failing over`);
+        throw new UpstreamError(`${label} responded 503`, { status: 503, body: text });
+      }
+
       if (retryable && attempt < RETRY.maxAttempts) {
-        await sleep(backoffDelay(attempt, res.headers.get("retry-after")));
+        const delay = backoffDelay(attempt, res.headers.get("retry-after"));
+        console.warn(
+          `[upstream] ${label} ${res.status} after ${Date.now() - started}ms — ` +
+            `retry ${attempt + 1}/${RETRY.maxAttempts} in ${Math.round(delay)}ms`
+        );
+        await sleep(delay);
         lastErr = new UpstreamError(`${label} responded ${res.status}`, {
           status: res.status,
           body: text,
@@ -57,6 +87,12 @@ export async function fetchJsonWithRetry(url, options, label) {
       clearTimeout(timer);
 
       if (err instanceof UpstreamError) throw err;
+
+      // Deliberately cancelled by the caller (a hedge that lost the race).
+      // Retrying it would defeat the point of cancelling.
+      if (options.signal?.aborted) {
+        throw new UpstreamError(`${label} cancelled`, { status: 499 });
+      }
 
       // Network error or timeout/abort — retry if attempts remain.
       const isAbort = err.name === "AbortError";

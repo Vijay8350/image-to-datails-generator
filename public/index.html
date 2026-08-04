@@ -43,6 +43,8 @@
         </div>
 
         <button id="extractBtn" class="primary" disabled>Extract fields from photo</button>
+        <label class="autorun"><input type="checkbox" id="autoRun" checked />
+          Write the listing straight away <small>— skips the second click</small></label>
         <div id="extractStatus" class="status"></div>
       </section>
 
@@ -56,6 +58,7 @@
           <div id="extractedFields" class="kv-grid"></div>
         </details>
         <button id="generateBtn" class="primary">Generate Meesho listing fields</button>
+        <small class="regen-hint">Changed the category? Press this to rewrite the copy.</small>
         <div id="generateStatus" class="status"></div>
       </section>
 

@@ -118,6 +118,13 @@ button.copy {
 button.copy:hover { background: #e6dcee; }
 button.copy.done { background: var(--ok); color: #fff; }
 
+.autorun {
+  display: flex; align-items: center; gap: 7px;
+  margin-top: 10px; font-size: 0.85rem; cursor: pointer; color: var(--muted);
+}
+.autorun small { opacity: 0.85; }
+.regen-hint { display: block; margin-top: 8px; color: var(--muted); font-size: 0.8rem; }
+
 .status { margin-top: 12px; font-size: 0.88rem; min-height: 1.2em; }
 .status.err { color: var(--err); }
 .status.ok { color: var(--ok); }
