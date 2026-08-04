@@ -11,6 +11,9 @@ import {
   DEEPSEEK_MODEL,
   DEEPSEEK_API_BASE,
   DEEPSEEK_CHAT_PATH,
+  DEEPSEEK_REASONING_EFFORT,
+  DEEPSEEK_MAX_TOKENS,
+  DEEPSEEK_MAX_TOKENS_RETRY,
   TITLE_MAX,
   DESC_MAX,
 } from "./config.js";
@@ -30,42 +33,54 @@ export async function generateListing(extracted, category) {
   if (!apiKey) throw new UpstreamError("DEEPSEEK_API_KEY is not configured.", { status: 500 });
 
   const url = `${DEEPSEEK_API_BASE}${DEEPSEEK_CHAT_PATH}`;
+  const messages = [
+    { role: "system", content: buildDeepSeekSystemPrompt() },
+    { role: "user", content: buildDeepSeekUserPrompt(extracted, category) },
+  ];
 
-  const body = {
-    model: DEEPSEEK_MODEL,
-    messages: [
-      { role: "system", content: buildDeepSeekSystemPrompt() },
-      { role: "user", content: buildDeepSeekUserPrompt(extracted, category) },
-    ],
-    response_format: { type: "json_object" },
-    temperature: 0.7,
-    // deepseek-v4-flash is a reasoning model: reasoning_content shares this
-    // budget with the JSON output, so keep it generous to avoid truncation.
-    max_tokens: 4000,
-  };
-
-  const json = await fetchJsonWithRetry(
-    url,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
+  const call = (maxTokens) =>
+    fetchJsonWithRetry(
+      url,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model: DEEPSEEK_MODEL,
+          messages,
+          response_format: { type: "json_object" },
+          temperature: 0.7,
+          // Reasoning tokens are billed against max_tokens, so leaving thinking
+          // on truncates the JSON before it finishes. See config.js.
+          reasoning_effort: DEEPSEEK_REASONING_EFFORT,
+          max_tokens: maxTokens,
+        }),
       },
-      body: JSON.stringify(body),
-    },
-    "DeepSeek"
-  );
+      "DeepSeek"
+    );
+
+  let json = await call(DEEPSEEK_MAX_TOKENS);
+
+  // Defensive: if a future model build ignores reasoning_effort and thinks the
+  // budget away anyway, escalate once rather than failing the whole listing
+  // (in bulk mode this used to fail every item in the batch at once).
+  if (json?.choices?.[0]?.finish_reason === "length") {
+    json = await call(DEEPSEEK_MAX_TOKENS_RETRY);
+  }
 
   const choice = json?.choices?.[0];
-  if (choice?.finish_reason === "length") {
+  const content = choice?.message?.content;
+
+  if (choice?.finish_reason === "length" && !isParsableJson(content)) {
     throw new UpstreamError(
-      "DeepSeek output was truncated (hit max_tokens). Try again.",
+      `DeepSeek output was truncated even at ${DEEPSEEK_MAX_TOKENS_RETRY} tokens — ` +
+        "the model is spending its budget on reasoning. Check DEEPSEEK_REASONING_EFFORT in src/config.js.",
       { status: 502 }
     );
   }
 
-  const content = choice?.message?.content;
   if (!content) {
     throw new UpstreamError("DeepSeek returned no content.", {
       status: 502,
@@ -84,6 +99,16 @@ export async function generateListing(extracted, category) {
   }
 
   return normalizeListing(parsed);
+}
+
+function isParsableJson(s) {
+  if (!s) return false;
+  try {
+    JSON.parse(s);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**

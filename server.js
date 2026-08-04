@@ -22,6 +22,8 @@ import {
   MAX_IMAGES_PER_REQUEST,
   MAX_COMBINED_BYTES,
   BATCH_CONCURRENCY,
+  CLIENT_IMAGE_MAX_DIM,
+  CLIENT_IMAGE_QUALITY,
 } from "./src/config.js";
 import { extractFieldsFromImages } from "./src/gemini.js";
 import { generateListing } from "./src/deepseek.js";
@@ -133,6 +135,14 @@ app.get("/api/rules", (_req, res) => {
     prohibited: PROHIBITED_CATEGORIES,
     pricing_defaults: PRICING_DEFAULTS,
     pricing_fields: PRICING_FIELDS,
+    // The browser downscales to these bounds before uploading — Gemini bills a
+    // fixed token cost per image regardless of resolution, so extra pixels are
+    // pure upload latency.
+    image_processing: {
+      max_dim: CLIENT_IMAGE_MAX_DIM,
+      quality: CLIENT_IMAGE_QUALITY,
+      max_images: MAX_IMAGES_PER_REQUEST,
+    },
   });
 });
 

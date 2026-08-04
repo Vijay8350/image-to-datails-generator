@@ -11,6 +11,7 @@ import {
   GEMINI_MODEL,
   GEMINI_MODEL_FALLBACKS,
   GEMINI_API_BASE,
+  GEMINI_THINKING_LEVEL,
 } from "./config.js";
 import {
   GEMINI_EXTRACT_SCHEMA,
@@ -39,14 +40,29 @@ export async function extractFieldsFromImages(images) {
     });
   });
 
-  const body = {
+  const buildBody = (withThinking) => ({
     contents: [{ role: "user", parts }],
     generationConfig: {
       responseMimeType: "application/json",
       responseSchema: GEMINI_EXTRACT_SCHEMA,
       temperature: 0.2,
+      // Capping thinking roughly halves vision latency with no loss of
+      // extraction quality — this is a "read the attributes off the photo"
+      // task, not one that benefits from deliberation. See config.js.
+      ...(withThinking ? { thinkingConfig: { thinkingLevel: GEMINI_THINKING_LEVEL } } : {}),
     },
-  };
+  });
+
+  const post = (model, withThinking) =>
+    fetchJsonWithRetry(
+      `${GEMINI_API_BASE}/${model}:generateContent`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
+        body: JSON.stringify(buildBody(withThinking)),
+      },
+      `Gemini (${model})`
+    );
 
   // Try the primary model, then each fallback if the model is UNAVAILABLE (503).
   const models = [GEMINI_MODEL, ...GEMINI_MODEL_FALLBACKS];
@@ -54,19 +70,24 @@ export async function extractFieldsFromImages(images) {
   let json;
   for (const model of models) {
     try {
-      json = await fetchJsonWithRetry(
-        `${GEMINI_API_BASE}/${model}:generateContent`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
-          body: JSON.stringify(body),
-        },
-        `Gemini (${model})`
-      );
+      json = await post(model, true);
       break; // success
     } catch (err) {
       lastErr = err;
       if (err instanceof UpstreamError && err.status === 503) continue;
+      // A model that doesn't know thinkingConfig rejects the whole request with
+      // 400 INVALID_ARGUMENT. Don't let a latency optimisation be fatal — retry
+      // this same model once without it before giving up on it.
+      if (err instanceof UpstreamError && err.status === 400) {
+        try {
+          json = await post(model, false);
+          break;
+        } catch (plainErr) {
+          lastErr = plainErr;
+          if (plainErr instanceof UpstreamError && plainErr.status === 503) continue;
+          throw plainErr;
+        }
+      }
       throw err;
     }
   }

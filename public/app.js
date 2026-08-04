@@ -22,6 +22,9 @@ const state = {
   attributeSet: null, // mandatory/optional for current category
 };
 
+// Fallback if /api/rules hasn't loaded yet; the server is the source of truth.
+const IMAGE_DEFAULTS = { max_dim: 1280, quality: 0.85 };
+
 const photoMode = () =>
   document.querySelector('input[name="photoMode"]:checked')?.value || "combine";
 
@@ -124,30 +127,111 @@ function renderThumbs() {
       : `Extract from ${n} photos (1 product)`;
 }
 
+// ---- Image downscaling -------------------------------------------------------
+/**
+ * Shrink a photo in the browser before uploading it.
+ *
+ * Gemini charges a flat prompt-token cost per inline image no matter its
+ * resolution, so a 12 MP phone photo costs exactly as much as a 1280px one but
+ * takes many times longer to upload — which is most of the "generating takes
+ * forever" wait, especially on a phone connection with several photos queued.
+ *
+ * Returns the ORIGINAL file untouched if anything goes wrong (e.g. HEIC, which
+ * most browsers cannot decode to a canvas) — the server still accepts it.
+ */
+async function downscaleImage(file, maxDim, quality) {
+  try {
+    if (!("createImageBitmap" in window)) return file;
+
+    const bitmap = await createImageBitmap(file, { imageOrientation: "from-image" });
+    const { width, height } = bitmap;
+    const scale = Math.min(1, maxDim / Math.max(width, height));
+
+    // Already small enough and already a compact format — leave it alone.
+    if (scale === 1 && file.type === "image/jpeg") {
+      bitmap.close?.();
+      return file;
+    }
+
+    const w = Math.max(1, Math.round(width * scale));
+    const h = Math.max(1, Math.round(height * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+
+    const ctx = canvas.getContext("2d");
+    ctx.imageSmoothingQuality = "high";
+    // PNGs with transparency would flatten to black on a JPEG, and Meesho wants
+    // a plain white background anyway.
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(0, 0, w, h);
+    ctx.drawImage(bitmap, 0, 0, w, h);
+    bitmap.close?.();
+
+    const blob = await new Promise((resolve) =>
+      canvas.toBlob(resolve, "image/jpeg", quality)
+    );
+    if (!blob || blob.size >= file.size) return file; // no win — keep the original
+
+    return new File([blob], file.name.replace(/\.[^.]+$/, "") + ".jpg", {
+      type: "image/jpeg",
+      lastModified: file.lastModified,
+    });
+  } catch {
+    return file; // undecodable (HEIC etc.) — let the server deal with it
+  }
+}
+
+/** Ticking "N s" suffix so a long call never looks like a hang. */
+function startElapsed(el, prefix) {
+  const t0 = Date.now();
+  const tick = () => {
+    el.textContent = `${prefix} ${Math.round((Date.now() - t0) / 1000)}s`;
+  };
+  tick();
+  const id = setInterval(tick, 1000);
+  return () => clearInterval(id);
+}
+
 // ---- STEP 1: extract ---------------------------------------------------------
 async function runExtract() {
   const status = $("extractStatus");
   const n = state.files.length;
   state.mode = n > 1 ? photoMode() : "combine";
 
-  setStatus(
-    status,
-    state.mode === "batch"
-      ? `Reading ${n} photos with Gemini (one product each)…`
-      : n > 1
-      ? `Reading ${n} photos with Gemini (same product)…`
-      : "Reading image with Gemini…",
-    "busy"
-  );
   $("extractBtn").disabled = true;
+  let stopTimer = () => {};
 
   try {
+    const img = state.rules?.image_processing || IMAGE_DEFAULTS;
+    setStatus(status, `Preparing ${n} photo${n > 1 ? "s" : ""}…`, "busy");
+
+    const before = state.files.reduce((sum, f) => sum + f.size, 0);
+    const upload = await Promise.all(
+      state.files.map((f) => downscaleImage(f, img.max_dim, img.quality))
+    );
+    const after = upload.reduce((sum, f) => sum + f.size, 0);
+    const saved = before > 0 ? Math.round((1 - after / before) * 100) : 0;
+
+    const label =
+      state.mode === "batch"
+        ? `Reading ${n} photos with Gemini (one product each)…`
+        : n > 1
+        ? `Reading ${n} photos with Gemini (same product)…`
+        : "Reading image with Gemini…";
+    setStatus(status, label, "busy");
+    stopTimer = startElapsed(
+      status,
+      label + (saved > 5 ? ` (upload shrunk ${saved}%)` : "")
+    );
+
     const fd = new FormData();
-    state.files.forEach((f) => fd.append("images", f));
+    upload.forEach((f) => fd.append("images", f));
     fd.append("mode", state.mode);
 
     const res = await fetch(api("/api/extract"), { method: "POST", body: fd });
     const data = await res.json();
+    stopTimer();
     if (!res.ok) throw new Error(data.error || "Extraction failed");
 
     if (data.mode === "batch") {
@@ -176,6 +260,7 @@ async function runExtract() {
     $("step-extracted").classList.remove("hidden");
     $("step-extracted").scrollIntoView({ behavior: "smooth", block: "start" });
   } catch (err) {
+    stopTimer();
     setStatus(status, err.message, "err");
   } finally {
     $("extractBtn").disabled = false;
@@ -295,11 +380,13 @@ function renderExtracted(fields, warnings, imageCount = 1) {
 async function runGenerate() {
   const status = $("generateStatus");
   $("generateBtn").disabled = true;
+  let stopTimer = () => {};
 
   try {
     if (state.mode === "batch" && state.batchItems) {
       const good = state.batchItems.filter((i) => i.ok);
-      setStatus(status, `Writing ${good.length} listings with DeepSeek…`, "busy");
+      if (!good.length) throw new Error("No photos were extracted successfully — nothing to generate.");
+      stopTimer = startElapsed(status, `Writing ${good.length} listings with DeepSeek…`);
 
       const res = await fetch(api("/api/generate"), {
         method: "POST",
@@ -313,13 +400,20 @@ async function runGenerate() {
         }),
       });
       const data = await res.json();
+      stopTimer();
       if (!res.ok) throw new Error(data.error || "Generation failed");
 
       renderBatchListings(data);
       const failed = data.count - data.succeeded;
+      // Surface WHY items failed instead of only a count — a shared upstream
+      // cause (rate limit, truncation) is otherwise invisible from the summary.
+      const reasons = [
+        ...new Set(data.items.filter((i) => !i.ok).map((i) => i.error).filter(Boolean)),
+      ];
       setStatus(
         status,
-        `Generated ${data.succeeded}/${data.count} listings.` + (failed ? ` ${failed} failed.` : ""),
+        `Generated ${data.succeeded}/${data.count} listings.` +
+          (failed ? ` ${failed} failed: ${reasons.join(" | ")}` : ""),
         failed ? "warn" : "ok"
       );
       $("step-batch").classList.remove("hidden");
@@ -328,7 +422,7 @@ async function runGenerate() {
       return;
     }
 
-    setStatus(status, "Writing compliant copy with DeepSeek…", "busy");
+    stopTimer = startElapsed(status, "Writing compliant copy with DeepSeek…");
     const category = $("category").value;
     const res = await fetch(api("/api/generate"), {
       method: "POST",
@@ -336,6 +430,7 @@ async function runGenerate() {
       body: JSON.stringify({ fields: state.extracted, category }),
     });
     const data = await res.json();
+    stopTimer();
     if (!res.ok) throw new Error(data.error || "Generation failed");
 
     state.attributeSet = data.attribute_set;
@@ -345,6 +440,7 @@ async function runGenerate() {
     $("step-listing").classList.remove("hidden");
     $("step-listing").scrollIntoView({ behavior: "smooth", block: "start" });
   } catch (err) {
+    stopTimer();
     setStatus(status, err.message, "err");
   } finally {
     $("generateBtn").disabled = false;
